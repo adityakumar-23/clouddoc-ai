@@ -1,0 +1,24 @@
+{
+  "name": "clouddoc-ai-root",
+  "version": "1.0.0",
+  "description": "CloudDoc AI - Production-Grade Cloud Document Processing & Conversion Platform",
+  "private": true,
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev:backend": "npm --prefix backend run dev",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "build": "npm --prefix backend run build && npm --prefix frontend run build",
+    "start": "npm --prefix backend run start",
+    "migrate": "npm --prefix backend run migrate",
+    "seed": "npm --prefix backend run seed",
+    "test": "npm --prefix backend test && npm --prefix frontend test",
+    "lint": "npm --prefix backend run lint && npm --prefix frontend run lint"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

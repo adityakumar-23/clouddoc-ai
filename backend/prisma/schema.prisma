@@ -1,0 +1,282 @@
+// ==============================================================================
+// Prisma Schema - CloudDoc AI (PostgreSQL on Amazon RDS)
+// ==============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  USER
+  ADMIN
+  AUDITOR
+}
+
+enum DocumentStatus {
+  PENDING
+  READY
+  PROCESSING
+  FAILED
+}
+
+enum JobStatus {
+  QUEUED
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum MessageSender {
+  USER
+  ASSISTANT
+  SYSTEM
+}
+
+enum SubscriptionPlan {
+  FREE
+  PRO
+  ENTERPRISE
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  PAST_DUE
+  CANCELED
+  TRIALING
+}
+
+// ------------------------------------------------------------------------------
+// User Entity
+// ------------------------------------------------------------------------------
+model User {
+  id                   String        @id @default(uuid())
+  email                String        @unique
+  passwordHash         String        @map("password_hash")
+  fullName             String        @map("full_name")
+  role                 Role          @default(USER)
+  isVerified           Boolean       @default(false) @map("is_verified")
+  verificationToken    String?       @map("verification_token")
+  resetPasswordToken   String?       @map("reset_password_token")
+  resetPasswordExpires DateTime?     @map("reset_password_expires")
+  avatarUrl            String?       @map("avatar_url")
+  createdAt            DateTime      @default(now()) @map("created_at")
+  updatedAt            DateTime      @updatedAt @map("updated_at")
+  deletedAt            DateTime?     @map("deleted_at")
+
+  // Relationships
+  documents            Document[]
+  processingJobs       ProcessingJob[]
+  aiConversations      AIConversation[]
+  auditLogs            AuditLog[]
+  subscription         Subscription?
+  usage                UsageMetric?
+
+  @@index([email])
+  @@index([role])
+  @@index([deletedAt])
+  @@map("users")
+}
+
+// ------------------------------------------------------------------------------
+// Document Entity (Metadata & S3 Pointer)
+// ------------------------------------------------------------------------------
+model Document {
+  id               String          @id @default(uuid())
+  userId           String          @map("user_id")
+  title            String
+  originalName     String          @map("original_name")
+  fileType         String          @map("file_type") // pdf, docx, pptx, xlsx, png, jpg
+  mimeType         String          @map("mime_type")
+  fileSize         BigInt          @map("file_size")
+  s3Bucket         String          @map("s3_bucket")
+  s3Key            String          @map("s3_key")
+  pageCount        Int             @default(1) @map("page_count")
+  isFavorite       Boolean         @default(false) @map("is_favorite")
+  status           DocumentStatus  @default(READY)
+  metadata         Json?           @default("{}") // Extracted text preview, author, keywords, etc.
+  createdAt        DateTime        @default(now()) @map("created_at")
+  updatedAt        DateTime        @updatedAt @map("updated_at")
+  deletedAt        DateTime?       @map("deleted_at")
+
+  // Relationships
+  user             User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  versions         DocumentVersion[]
+  processingJobs   ProcessingJob[]
+  aiConversations  AIConversation[]
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([userId, isFavorite])
+  @@index([fileType])
+  @@index([status])
+  @@index([deletedAt])
+  @@map("documents")
+}
+
+// ------------------------------------------------------------------------------
+// Document Version Tracking
+// ------------------------------------------------------------------------------
+model DocumentVersion {
+  id            String    @id @default(uuid())
+  documentId    String    @map("document_id")
+  versionNumber Int       @map("version_number")
+  s3Key         String    @map("s3_key")
+  fileSize      BigInt    @map("file_size")
+  operation     String    // e.g. "rotate_90", "compress", "merge"
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  document      Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, versionNumber])
+  @@index([documentId])
+  @@map("document_versions")
+}
+
+// ------------------------------------------------------------------------------
+// Asynchronous Processing Job
+// ------------------------------------------------------------------------------
+model ProcessingJob {
+  id              String      @id @default(uuid())
+  userId          String      @map("user_id")
+  documentId      String?     @map("document_id")
+  toolType        String      @map("tool_type") // "pdf-to-word", "merge-pdf", "compress-pdf", "ocr", etc.
+  status          JobStatus   @default(QUEUED)
+  progress        Int         @default(0) // 0 to 100
+  parameters      Json?       @default("{}")
+  outputS3Key     String?     @map("output_s3_key")
+  outputFileName  String?     @map("output_file_name")
+  outputFileSize  BigInt?     @map("output_file_size")
+  errorMessage    String?     @map("error_message")
+  executionTimeMs Int?        @map("execution_time_ms")
+  startedAt       DateTime?   @map("started_at")
+  completedAt     DateTime?   @map("completed_at")
+  createdAt       DateTime    @default(now()) @map("created_at")
+  updatedAt       DateTime    @updatedAt @map("updated_at")
+
+  // Relationships
+  user            User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  document        Document?   @relation(fields: [documentId], references: [id], onDelete: SetNull)
+  history         ProcessingHistory[]
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([status, createdAt])
+  @@index([toolType])
+  @@map("processing_jobs")
+}
+
+// ------------------------------------------------------------------------------
+// Processing History Event Log
+// ------------------------------------------------------------------------------
+model ProcessingHistory {
+  id         String        @id @default(uuid())
+  jobId      String        @map("job_id")
+  status     JobStatus
+  message    String
+  progress   Int           @default(0)
+  createdAt  DateTime      @default(now()) @map("created_at")
+
+  job        ProcessingJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId])
+  @@map("processing_histories")
+}
+
+// ------------------------------------------------------------------------------
+// AI Conversation (RAG Q&A Session)
+// ------------------------------------------------------------------------------
+model AIConversation {
+  id         String       @id @default(uuid())
+  userId     String       @map("user_id")
+  documentId String?      @map("document_id")
+  title      String       @default("New Conversation")
+  createdAt  DateTime     @default(now()) @map("created_at")
+  updatedAt  DateTime     @updatedAt @map("updated_at")
+
+  user       User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  document   Document?    @relation(fields: [documentId], references: [id], onDelete: SetNull)
+  messages   AIMessage[]
+
+  @@index([userId, updatedAt(sort: Desc)])
+  @@index([documentId])
+  @@map("ai_conversations")
+}
+
+// ------------------------------------------------------------------------------
+// AI Message with Grounding Citations
+// ------------------------------------------------------------------------------
+model AIMessage {
+  id               String          @id @default(uuid())
+  conversationId   String          @map("conversation_id")
+  sender           MessageSender
+  content          String          @db.Text
+  citations        Json?           @default("[]") // Array of { page: number, snippet: string, score: number }
+  promptTokens     Int?            @map("prompt_tokens")
+  completionTokens Int?            @map("completion_tokens")
+  createdAt        DateTime        @default(now()) @map("created_at")
+
+  conversation     AIConversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt(sort: Asc)])
+  @@map("ai_messages")
+}
+
+// ------------------------------------------------------------------------------
+// User Subscription
+// ------------------------------------------------------------------------------
+model Subscription {
+  id               String              @id @default(uuid())
+  userId           String              @unique @map("user_id")
+  plan             SubscriptionPlan    @default(FREE)
+  status           SubscriptionStatus  @default(ACTIVE)
+  currentPeriodEnd DateTime            @default(now()) @map("current_period_end")
+  createdAt        DateTime            @default(now()) @map("created_at")
+  updatedAt        DateTime            @updatedAt @map("updated_at")
+
+  user             User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("subscriptions")
+}
+
+// ------------------------------------------------------------------------------
+// Usage Tracking & Quota Limits
+// ------------------------------------------------------------------------------
+model UsageMetric {
+  id                  String    @id @default(uuid())
+  userId              String    @unique @map("user_id")
+  storageUsedBytes    BigInt    @default(0) @map("storage_used_bytes")
+  storageLimitBytes   BigInt    @default(524288000) @map("storage_limit_bytes") // 500 MB default Free
+  monthlyConversions  Int       @default(0) @map("monthly_conversions")
+  monthlyAiRequests   Int       @default(0) @map("monthly_ai_requests")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+
+  user                User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("usage_metrics")
+}
+
+// ------------------------------------------------------------------------------
+// Audit Logging for Enterprise Security Compliance
+// ------------------------------------------------------------------------------
+model AuditLog {
+  id         String    @id @default(uuid())
+  userId     String?   @map("user_id")
+  action     String    // e.g. "AUTH_LOGIN", "DOCUMENT_UPLOAD", "DOCUMENT_DELETE", "JOB_SUBMIT"
+  entityType String    @map("entity_type") // "USER", "DOCUMENT", "PROCESSING_JOB"
+  entityId   String?   @map("entity_id")
+  ipAddress  String?   @map("ip_address")
+  userAgent  String?   @map("user_agent")
+  details    Json?     @default("{}")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  user       User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([action])
+  @@index([createdAt])
+  @@map("audit_logs")
+}

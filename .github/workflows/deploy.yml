@@ -1,0 +1,101 @@
+name: CloudDoc CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test-and-build:
+    name: Test and Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      # Backend Tests & Build
+      - name: Install Backend Dependencies
+        working-directory: ./backend
+        run: npm ci
+
+      - name: Generate Prisma Client
+        working-directory: ./backend
+        run: npx prisma generate
+
+      - name: Run Backend Tests
+        working-directory: ./backend
+        run: npm test
+
+      - name: Build Backend
+        working-directory: ./backend
+        run: npm run build
+
+      # Frontend Tests & Build
+      - name: Install Frontend Dependencies
+        working-directory: ./frontend
+        run: npm ci
+
+      - name: Build Frontend SPA
+        working-directory: ./frontend
+        run: npm run build
+
+  deploy-ec2:
+    name: Deploy to AWS EC2
+    needs: test-and-build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure SSH Key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy Code & Restart PM2 on EC2
+        env:
+          EC2_USER: ${{ secrets.EC2_USER }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          ssh -i ~/.ssh/deploy_key $EC2_USER@$EC2_HOST 'bash -s' << 'EOF'
+            set -e
+            echo "--- Starting CloudDoc AI Production Deployment ---"
+            cd /opt/clouddoc
+            
+            # Pull latest changes
+            git fetch origin main
+            git reset --hard origin/main
+
+            # Backend Build & Migration
+            cd /opt/clouddoc/backend
+            npm ci --production=false
+            npx prisma generate
+            npx prisma migrate deploy
+            npm run build
+
+            # Frontend Build & Deploy to Nginx Web Root
+            cd /opt/clouddoc/frontend
+            npm ci
+            npm run build
+            sudo rm -rf /var/www/clouddoc/html/*
+            sudo cp -r dist/* /var/www/clouddoc/html/
+
+            # Reload PM2 API and Worker Cluster
+            cd /opt/clouddoc
+            pm2 reload ecosystem.config.js --env production
+            sudo systemctl reload nginx
+
+            echo "--- Deployment Finished Successfully ---"
+          EOF
